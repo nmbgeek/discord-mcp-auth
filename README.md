@@ -22,6 +22,95 @@ designed to integrate Discord bots with MCP-compatible applications such as Clau
 Discord by managing channels, sending messages, and retrieving server information. Ideal for building powerful Discord automation and AI-driven workflows.
 
 
+## Discord bot setup and permissions
+
+Create an application in the [Discord Developer Portal](https://discord.com/developers/applications),
+open its **Bot** page, and copy or reset the bot token. Use that token as `DISCORD_TOKEN`,
+not the application's client secret. Keep `MCP_AUTH_TOKEN` as a separate secret for your agents.
+
+### Enable the required intents
+
+On **Bot > Privileged Gateway Intents**, configure:
+
+| Intent | Setting for this server |
+| --- | --- |
+| Server Members Intent | **On.** The server requests this intent at startup for member-related tools. Leaving it off can prevent the bot from connecting. |
+| Message Content Intent | **On for reading other users' messages and attachment metadata.** Otherwise Discord can return empty content, except for messages such as the bot's own messages, DMs with the bot, and messages mentioning it. |
+| Presence Intent | **Off.** The current tools do not require it. |
+
+Intents are separate from the bot role's permissions. The message-reading tools fetch history
+through Discord's HTTP API, so the application's Message Content setting matters even though
+this server does not subscribe to that intent on the Gateway. See Discord's
+[privileged intents and HTTP restrictions](https://docs.discord.com/developers/events/gateway#http-restrictions).
+Follow any intent approval requirements shown in the Developer Portal, then restart the server.
+
+### Install the bot in your server
+
+1. Open **Installation**, enable **Guild Install**, and choose **Discord Provided Link**.
+2. Under **Default Install Settings > Guild Install**, add the `bot` scope and select the
+   permissions below. This MCP server does not register slash commands, so it does not need
+   the `applications.commands` scope. User Install alone is not sufficient.
+3. Open the install link, choose **Add to server**, select your server, and authorize it.
+   Your Discord account needs permission to manage that server.
+4. In Discord, check **Server Settings > Roles** and the target channels' permission overrides.
+   Install settings define the requested permissions; the bot's actual server role and channel
+   overrides control access after installation.
+
+Discord's [installation guide](https://docs.discord.com/developers/quick-start/getting-started#adding-scopes-and-bot-permissions)
+shows where these settings are located. Use the permissions for this project below rather than
+copying the sample bot's selection.
+
+### Start with reading and posting
+
+Grant **View Channels**, **Read Message History**, and **Send Messages** in the channels your
+agents should use. For a read-only bot, omit Send Messages. Add **Add Reactions** if needed,
+and **Embed Links** if you want automatic previews for posted links.
+
+Do not grant **Administrator**. It bypasses channel restrictions. Every agent with the MCP
+bearer token can invoke every exposed tool, so Discord permissions are the limit on what those
+tools can do. See Discord's [permission reference](https://docs.discord.com/developers/topics/permissions).
+
+### Add permissions for optional tools
+
+| Tool or capability | Additional bot permissions |
+| --- | --- |
+| Delete other users' messages | Manage Messages. Editing messages is limited to the bot's own messages. |
+| Create or edit channels, categories, voice channels, and forums | Manage Channels |
+| Create, edit, assign, or remove roles; edit channel permission overrides | Manage Roles |
+| Create, list, or delete webhooks | Manage Webhooks |
+| Kick members | Kick Members |
+| Ban, unban, or list bans | Ban Members |
+| Set or remove timeouts | Moderate Members |
+| Change other members' nicknames | Manage Nicknames |
+| Move or disconnect voice members | Move Members; moving also requires Connect in the destination channel |
+| Server-mute or deafen voice members | Mute Members and/or Deafen Members |
+| Create invites | Create Invite |
+| List all server invites | Manage Server |
+| Revoke invites | Manage Channels for the invite's channel, or Manage Server |
+| Create a forum post | Send Messages in the parent forum; creating a post does not require Create Public Threads |
+| Send messages inside threads or forum posts | Send Messages in Threads |
+| Lock, archive, pin, or otherwise manage other users' forum posts | Manage Threads |
+| Create emojis | Create Expressions |
+| Edit or delete other users' emojis | Manage Expressions |
+| Create scheduled events | Create Events |
+| Edit or delete other users' scheduled events | Manage Events |
+
+For [scheduled voice events](https://docs.discord.com/developers/resources/guild-scheduled-event#guild-scheduled-event-permissions-requirements),
+also grant View Channels and Connect in the associated channel. Stage events additionally
+require Manage Channels, Mute Members, and Move Members there. For
+[emoji management](https://docs.discord.com/developers/resources/emoji#create-guild-emoji),
+Create Expressions covers creating emojis and editing or deleting the bot's own emojis.
+
+Place the bot's highest role **above the roles and members it needs to manage**. Discord's
+role hierarchy still blocks actions against equal or higher roles and the server owner.
+Limit View Channels to the channels agents should access. `DISCORD_GUILD_ID` only supplies
+a default server ID; it does not restrict access to other servers the bot has joined.
+
+If a tool reports **Missing Access** or **Missing Permissions**, check the target channel's
+overrides and role hierarchy as well as the bot role. Empty message content usually points
+to Message Content Intent. Private-message tools operate on conversations with the bot,
+not users' private conversations with one another, and recipients' privacy settings can block DMs.
+
 ## 🔬 Installation
 
 ### ► 🐳 Docker Installation (Recommended)
@@ -38,7 +127,7 @@ export MCP_AUTH_TOKEN="$(openssl rand -hex 32)"
 ```
 
 > [!IMPORTANT]
-> Instructions for creating a Discord bot and retrieving its token can be found [here](https://discordjs.guide/legacy/preparations/app-setup).
+> Complete [Discord bot setup and permissions](#discord-bot-setup-and-permissions) before starting the container.
 
 > [!TIP]
 > The `DISCORD_GUILD_ID` env variable is optional.
@@ -46,11 +135,10 @@ export MCP_AUTH_TOKEN="$(openssl rand -hex 32)"
 > When provided, it sets a default Discord server ID so any tool that accepts a `guildId` parameter can omit it.
 
 #### 2) Run the Docker container
-Build this checkout locally. After GitHub Actions publishes the first image, you can use
-`docker pull nmbgeek/discord-mcp-auth:latest` instead of the build command below.
+Pull the published image, then start the container:
 
 ```bash
-docker build -t nmbgeek/discord-mcp-auth:latest .
+docker pull nmbgeek/discord-mcp-auth:latest
 docker run -d -i \
   --name discord-mcp-auth \
   --restart unless-stopped \
@@ -63,6 +151,11 @@ docker run -d -i \
 ```
 
 Default MCP endpoint URL (HTTP profile): `http://localhost:8085/mcp`
+
+To build your checkout instead, run `docker build -t nmbgeek/discord-mcp-auth:latest .`.
+For production, pin the image by digest. Find it with
+`docker buildx imagetools inspect nmbgeek/discord-mcp-auth:latest`, then use
+`nmbgeek/discord-mcp-auth@sha256:<digest>` as the image. Update the digest when adopting a release.
 
 <details>
     <summary style="font-size: 1.35em; font-weight: bold;">
@@ -146,35 +239,6 @@ java -jar /absolute/path/to/discord-mcp-1.0.0.jar
 Default MCP endpoint URL (HTTP profile): `http://localhost:8085/mcp`
 
 </details>
-
-## Publishing to Docker Hub
-
-The GitHub Actions workflow in `.github/workflows/docker-publish.yml` runs on pushes to `main`.
-It runs the Maven tests as part of the Docker build and publishes
-`nmbgeek/discord-mcp-auth:latest` for `linux/amd64` and `linux/arm64`.
-Pushing a `v*` tag publishes the corresponding version tag. Manual runs accept a version and
-an optional update to `latest`.
-
-For production, pin the published image by digest so a later push cannot silently change
-your deployment. Find the digest with `docker buildx imagetools inspect nmbgeek/discord-mcp-auth:latest`,
-then use `nmbgeek/discord-mcp-auth@sha256:<digest>` as the Compose image. Review and update
-that digest when adopting a release.
-
-Build images are pinned by digest and GitHub Actions by commit SHA. Dependabot checks Maven,
-Docker, and Actions dependencies weekly. Spring AI uses a stable release; Jackson and Tomcat
-have explicit security patch overrides until the Spring Boot BOM catches up.
-
-Create the `discord-mcp-auth` repository under the `nmbgeek` Docker Hub account. In GitHub,
-open **Settings > Secrets and variables > Actions > New repository secret** and add:
-
-| Secret | Value |
-| --- | --- |
-| `DOCKERHUB_USERNAME` | `nmbgeek` |
-| `DOCKERHUB_TOKEN` | A Docker Hub personal access token with Read & Write permission |
-
-No GitHub Actions variables are required. `DISCORD_TOKEN` and `MCP_AUTH_TOKEN` are runtime
-secrets for your deployed container and are not needed for CI. For token creation, see the
-[Docker access token documentation](https://docs.docker.com/security/access-tokens/).
 
 ## HTTP authentication and remote access
 
