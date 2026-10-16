@@ -143,7 +143,7 @@ public class MessageService {
      * @param around    Optional message ID to fetch messages around this message.
      * @return A formatted string containing the retrieved messages.
      */
-    @Tool(name = "read_messages", description = "Read message history from a specific channel, optionally paginated with before/after/around")
+    @Tool(name = "read_messages", description = "Read message history from a specific channel, including attachments and embeds, optionally paginated with before/after/around")
     public String readMessages(@ToolParam(description = "Discord channel ID") String channelId,
                                @ToolParam(description = "Number of messages to retrieve (1-100)", required = false) String count,
                                @ToolParam(description = "Message ID to fetch messages before this message", required = false) String before,
@@ -169,8 +169,8 @@ public class MessageService {
         } else {
             messages = channel.getHistory().retrievePast(limit).complete();
         }
-        List<String> formatedMessages = formatMessages(messages);
-        return "**Retrieved " + messages.size() + " messages:** \n" + String.join("\n", formatedMessages);
+        List<String> formattedMessages = MessageFormatter.formatMessages(messages);
+        return "**Retrieved " + messages.size() + " messages:** \n" + String.join("\n", formattedMessages);
     }
 
     private int parseMessageLimit(String count) {
@@ -337,49 +337,9 @@ public class MessageService {
     private String formatAttachmentDetail(Message.Attachment attachment) {
         return String.format(
                 "- %s\n  Proxy URL: %s",
-                formatAttachmentSummary(attachment),
+                MessageFormatter.formatAttachmentSummary(attachment),
                 attachment.getProxyUrl()
         );
     }
 
-    private String formatAttachmentSummary(Message.Attachment attachment) {
-        return String.format(
-                "(Attachment ID: %s) `%s` (%s, %s) URL: %s",
-                attachment.getId(),
-                attachment.getFileName(),
-                formatFileSize(attachment.getSize()),
-                attachment.getContentType() != null ? attachment.getContentType() : "unknown",
-                attachment.getUrl()
-        );
-    }
-
-    private List<String> formatMessages(List<Message> messages) {
-        return messages.stream()
-                .map(m -> {
-                    String authorName = m.getAuthor().getName();
-                    String timestamp = m.getTimeCreated().toString();
-                    String content = m.getContentDisplay();
-                    String msgId = m.getId();
-
-                    StringBuilder sb = new StringBuilder();
-                    sb.append(String.format("- (ID: %s) **[%s]** `%s`: ```%s```", msgId, authorName, timestamp, content));
-
-                    List<Message.Attachment> attachments = m.getAttachments();
-                    if (!attachments.isEmpty()) {
-                        sb.append("\n  Attachments:");
-                        for (Message.Attachment attachment : attachments) {
-                            sb.append("\n    - ").append(formatAttachmentSummary(attachment));
-                        }
-                    }
-
-                    return sb.toString();
-                }).toList();
-    }
-
-    private String formatFileSize(int bytes) {
-        if (bytes < 1024) return bytes + " B";
-        if (bytes < 1024 * 1024) return String.format("%.1f KB", bytes / 1024.0);
-        if (bytes < 1024 * 1024 * 1024) return String.format("%.1f MB", bytes / (1024.0 * 1024));
-        return String.format("%.1f GB", bytes / (1024.0 * 1024 * 1024));
-    }
 }
