@@ -22,7 +22,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE_NAME: saseq/discord-mcp
+  IMAGE_NAME: nmbgeek/discord-mcp-auth
 
 jobs:
   publish:
@@ -103,7 +103,7 @@ jobs:
           images: ${{ env.IMAGE_NAME }}
           tags: ${{ steps.resolve_tags.outputs.tags }}
 
-      - name: Build and push multi-arch image
+      - name: Test, build, and push multi-arch image
         uses: docker/build-push-action@v6
         with:
           context: .

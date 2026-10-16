@@ -9,8 +9,8 @@
     <a href="https://discord.gg/5Uvxe5jteM" target="_blank" style="margin: 2px;">
         <img alt="Discord" src="https://img.shields.io/discord/936242526120194108?color=7389D8&label&logo=discord&logoColor=ffffff" style="display: inline-block; vertical-align: middle;"/>
     </a>
-    <a href="https://github.com/SaseQ/discord-mcp/blob/main/LICENSE" target="_blank" style="margin: 2px;">
-        <img alt="MIT License" src="https://img.shields.io/github/license/SaseQ/discord-mcp" style="display: inline-block; vertical-align: middle;"/>
+    <a href="https://github.com/nmbgeek/discord-mcp-auth/blob/main/LICENSE" target="_blank" style="margin: 2px;">
+        <img alt="MIT License" src="https://img.shields.io/github/license/nmbgeek/discord-mcp-auth" style="display: inline-block; vertical-align: middle;"/>
     </a>
 </div>
 
@@ -46,19 +46,20 @@ export MCP_AUTH_TOKEN="$(openssl rand -hex 32)"
 > When provided, it sets a default Discord server ID so any tool that accepts a `guildId` parameter can omit it.
 
 #### 2) Run the Docker container
-Build this checkout to include bearer authentication. The upstream published image may not include these changes.
+Build this checkout locally. After GitHub Actions publishes the first image, you can use
+`docker pull nmbgeek/discord-mcp-auth:latest` instead of the build command below.
 
 ```bash
-docker build -t discord-mcp:local .
+docker build -t nmbgeek/discord-mcp-auth:latest .
 docker run -d -i \
-  --name discord-mcp \
+  --name discord-mcp-auth \
   --restart unless-stopped \
   -p 127.0.0.1:8085:8085 \
   -e SPRING_PROFILES_ACTIVE \
   -e MCP_AUTH_TOKEN \
   -e DISCORD_TOKEN \
   -e DISCORD_GUILD_ID \
-  discord-mcp:local
+  nmbgeek/discord-mcp-auth:latest
 ```
 
 Default MCP endpoint URL (HTTP profile): `http://localhost:8085/mcp`
@@ -70,12 +71,12 @@ Default MCP endpoint URL (HTTP profile): `http://localhost:8085/mcp`
 
 #### 1) Clone the repository
 ```bash
-git clone https://github.com/SaseQ/discord-mcp
+git clone https://github.com/nmbgeek/discord-mcp-auth
 ```
 
 #### 2) Go to the project directory
 ```bash
-cd discord-mcp
+cd discord-mcp-auth
 ```
 
 #### 3) Create local runtime env
@@ -96,7 +97,7 @@ docker compose up -d --build
 
 #### 5) Verify
 ```bash
-docker ps --filter name=discord-mcp
+docker ps --filter name=discord-mcp-auth
 curl -fsS http://localhost:8085/actuator/health
 ```
 
@@ -117,7 +118,7 @@ Health endpoint (Actuator): `http://localhost:8085/actuator/health`
 
 #### 1) Clone the repository
 ```bash
-git clone https://github.com/SaseQ/discord-mcp
+git clone https://github.com/nmbgeek/discord-mcp-auth
 ```
 
 #### 2) Build the project
@@ -125,7 +126,7 @@ git clone https://github.com/SaseQ/discord-mcp
 > NOTE: Maven installation is required to use the mvn command. Full instructions can be found [here](https://www.baeldung.com/install-maven-on-windows-linux-mac).
 
 ```bash
-cd discord-mcp
+cd discord-mcp-auth
 mvn clean package # The jar file will be available in the /target directory
 ```
 
@@ -145,6 +146,26 @@ java -jar /absolute/path/to/discord-mcp-1.0.0.jar
 Default MCP endpoint URL (HTTP profile): `http://localhost:8085/mcp`
 
 </details>
+
+## Publishing to Docker Hub
+
+The GitHub Actions workflow in `.github/workflows/docker-publish.yml` runs on pushes to `main`.
+It runs the Maven tests as part of the Docker build and publishes
+`nmbgeek/discord-mcp-auth:latest` for `linux/amd64` and `linux/arm64`.
+Pushing a `v*` tag publishes the corresponding version tag. Manual runs accept a version and
+an optional update to `latest`.
+
+Create the `discord-mcp-auth` repository under the `nmbgeek` Docker Hub account. In GitHub,
+open **Settings > Secrets and variables > Actions > New repository secret** and add:
+
+| Secret | Value |
+| --- | --- |
+| `DOCKERHUB_USERNAME` | `nmbgeek` |
+| `DOCKERHUB_TOKEN` | A Docker Hub personal access token with Read & Write permission |
+
+No GitHub Actions variables are required. `DISCORD_TOKEN` and `MCP_AUTH_TOKEN` are runtime
+secrets for your deployed container and are not needed for CI. For token creation, see the
+[Docker access token documentation](https://docs.docker.com/security/access-tokens/).
 
 ## HTTP authentication and remote access
 
@@ -174,7 +195,7 @@ For cloud agents:
 
 Docker publishes port 8085 on `127.0.0.1` by default so a proxy on the host can reach it.
 For a proxy in another container, connect both services to a shared Docker network and use
-`http://discord-mcp:8085` as the upstream. If you need a different published interface,
+`http://discord-mcp-auth:8085` as the upstream. If you need a different published interface,
 set `MCP_BIND_ADDRESS` in Compose and restrict access to that port. Use HTTPS for public access;
 the application's port serves plain HTTP.
 
@@ -242,7 +263,7 @@ Legacy mode (stdio, starts a new process/container per client session):
         "DISCORD_TOKEN=<YOUR_DISCORD_BOT_TOKEN>",
         "-e",
         "DISCORD_GUILD_ID=<OPTIONAL_DEFAULT_SERVER_ID>",
-        "saseq/discord-mcp:latest"
+        "nmbgeek/discord-mcp-auth:latest"
       ]
     }
   }
@@ -262,7 +283,7 @@ claude mcp add discord-mcp --transport http http://localhost:8085/mcp \
 
 Legacy mode (stdio, starts a new process/container per client session):
 ```bash
-claude mcp add discord-mcp -- docker run --rm -i -e DISCORD_TOKEN=<YOUR_DISCORD_BOT_TOKEN> -e DISCORD_GUILD_ID=<OPTIONAL_DEFAULT_SERVER_ID> saseq/discord-mcp:latest
+claude mcp add discord-mcp -- docker run --rm -i -e DISCORD_TOKEN=<YOUR_DISCORD_BOT_TOKEN> -e DISCORD_GUILD_ID=<OPTIONAL_DEFAULT_SERVER_ID> nmbgeek/discord-mcp-auth:latest
 ```
 
 </details>
@@ -354,7 +375,7 @@ Pasting the following configuration into your Cursor `~/.cursor/mcp.json` file i
 
 #### Notes
 - If n8n is running in Docker, `localhost` may point to the n8n container itself, not your host machine.
-- In that case, use the Docker service name or another reachable host, for example: `http://discord-mcp:8085/mcp`
+- In that case, use the Docker service name or another reachable host, for example: `http://discord-mcp-auth:8085/mcp`
 
 </details>
 
@@ -380,7 +401,7 @@ STDIO local config (Default, legacy):
         "DISCORD_TOKEN=<YOUR_DISCORD_BOT_TOKEN>",
         "-e",
         "DISCORD_GUILD_ID=<OPTIONAL_DEFAULT_SERVER_ID>",
-        "saseq/discord-mcp:latest"
+        "nmbgeek/discord-mcp-auth:latest"
       ]
     }
   }

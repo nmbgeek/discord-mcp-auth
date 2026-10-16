@@ -1,9 +1,9 @@
 services:
-  discord-mcp:
-    container_name: discord-mcp
+  discord-mcp-auth:
+    container_name: discord-mcp-auth
     build:
       context: .
-    image: discord-mcp:local
+    image: nmbgeek/discord-mcp-auth:latest
     restart: unless-stopped
     ports:
       - "${MCP_BIND_ADDRESS:-127.0.0.1}:8085:8085"
