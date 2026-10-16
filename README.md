@@ -155,6 +155,15 @@ It runs the Maven tests as part of the Docker build and publishes
 Pushing a `v*` tag publishes the corresponding version tag. Manual runs accept a version and
 an optional update to `latest`.
 
+For production, pin the published image by digest so a later push cannot silently change
+your deployment. Find the digest with `docker buildx imagetools inspect nmbgeek/discord-mcp-auth:latest`,
+then use `nmbgeek/discord-mcp-auth@sha256:<digest>` as the Compose image. Review and update
+that digest when adopting a release.
+
+Build images are pinned by digest and GitHub Actions by commit SHA. Dependabot checks Maven,
+Docker, and Actions dependencies weekly. Spring AI uses a stable release; Jackson and Tomcat
+have explicit security patch overrides until the Spring Boot BOM catches up.
+
 Create the `discord-mcp-auth` repository under the `nmbgeek` Docker Hub account. In GitHub,
 open **Settings > Secrets and variables > Actions > New repository secret** and add:
 
@@ -178,7 +187,13 @@ The server refuses to start in HTTP mode if the token is missing, shorter than 3
 or contains characters outside the bearer-token format. Missing or incorrect credentials receive
 `401 Unauthorized` with a `WWW-Authenticate: Bearer` challenge. Tokens in URLs, cookies, or MCP
 session IDs do not authorize requests. GET and HEAD requests to `/actuator/health` remain public
-for Docker probes, with health details and components hidden by the HTTP profile.
+for Docker probes, with health details and components hidden.
+
+Actuator endpoint access defaults to `none`, with only `health` enabled for read access.
+Changing `management.endpoints.web.exposure.include` to `*` alone does not enable diagnostic
+endpoints. Keep `env`, `configprops`, and heap dumps disabled in deployed instances. Environment
+and configuration values are explicitly masked with `show-values=never`; overriding endpoint
+access and masking settings can expose runtime secrets to callers with access.
 
 Authentication applies to all HTTP routes, including a custom MCP endpoint path. Local stdio
 connections need no bearer token. For trusted local development only, you can explicitly set
@@ -521,9 +536,15 @@ of the service if the connector requires OAuth. This server does not implement O
 #### Emoji Management
 - [`list_emojis`](): List all custom emojis on the server
 - [`get_emoji_details`](): Get detailed information about a specific custom emoji
-- [`create_emoji`](): Upload a new custom emoji to the server (base64 or image URL, max 256KB)
+- [`create_emoji`](): Upload a base64 PNG, JPEG, or GIF (max 256 KiB and 1024 pixels per side)
 - [`edit_emoji`](): Edit an existing emoji's name or role restrictions
 - [`delete_emoji`](): Permanently delete a custom emoji from the server
+
+Emoji uploads accept raw base64 or a `data:image/png;base64,...`, `data:image/jpeg;base64,...`,
+or `data:image/gif;base64,...` URI in `image`. The legacy `imageUrl` parameter is rejected.
+Download images in your client and pass their bytes as base64. The server never fetches an
+emoji URL, preventing access to internal services, cloud metadata, or local files through this tool.
+Encoded size, decoded size, image type, and dimensions are checked before uploading to Discord.
 
 >If `DISCORD_GUILD_ID` is set, the `guildId` parameter becomes optional for all tools above.
 

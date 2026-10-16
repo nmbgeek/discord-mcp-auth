@@ -9,10 +9,7 @@ import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
-import java.io.IOException;
-import java.net.URI;
 import java.util.Arrays;
-import java.util.Base64;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -94,24 +91,17 @@ public class EmojiService {
         return sb.toString();
     }
 
-    @Tool(name = "create_emoji", description = "Upload a new custom emoji to the server. Provide image as base64 (Data URI or raw) OR a direct image URL. Max 256KB")
+    @Tool(name = "create_emoji", description = "Upload a base64 PNG, JPEG, or GIF emoji (data URI or raw). Max 256 KiB and 1024x1024 pixels. URL downloads are disabled.")
     public String createEmoji(
             @ToolParam(description = "Discord server ID", required = false) String guildId,
             @ToolParam(description = "Emoji name (2-32 chars, alphanumeric and underscores only)") String name,
             @ToolParam(description = "Image as base64 Data URI (e.g. data:image/png;base64,...) or raw base64 string", required = false) String image,
-            @ToolParam(description = "Direct URL to the image file (alternative to base64 image)", required = false) String imageUrl,
+            @ToolParam(description = "Unsupported legacy parameter. URL downloads are disabled; supply base64 in image instead.", required = false) String imageUrl,
             @ToolParam(description = "Comma-separated role IDs to restrict emoji usage (empty = everyone)", required = false) String roles) {
 
-        Guild guild = getGuild(guildId);
         name = validateAndNormalizeName(name);
-
-        byte[] imageBytes = resolveImage(image, imageUrl);
-
-        if (imageBytes.length > 256 * 1024) {
-            throw new IllegalArgumentException("Image exceeds 256 KB limit (" + (imageBytes.length / 1024) + " KB). Please compress or resize the image.");
-        }
-
-        net.dv8tion.jda.api.entities.Icon icon = net.dv8tion.jda.api.entities.Icon.from(imageBytes);
+        var icon = EmojiImage.from(image, imageUrl);
+        Guild guild = getGuild(guildId);
 
         Role[] roleArray = parseRoles(guild, roles);
         RichCustomEmoji emoji = guild.createEmoji(name, icon, roleArray).complete();
@@ -187,42 +177,6 @@ public class EmojiService {
             throw new IllegalArgumentException("Emoji name can only contain letters, numbers, and underscores");
         }
         return name;
-    }
-
-    private byte[] resolveImage(String image, String imageUrl) {
-        boolean hasImage = image != null && !image.isEmpty();
-        boolean hasUrl = imageUrl != null && !imageUrl.isEmpty();
-
-        if (!hasImage && !hasUrl) {
-            throw new IllegalArgumentException("Either 'image' (base64) or 'imageUrl' (direct link) must be provided");
-        }
-        if (hasImage && hasUrl) {
-            throw new IllegalArgumentException("Provide only one of 'image' or 'imageUrl', not both");
-        }
-
-        return hasUrl ? downloadImage(imageUrl) : decodeDataUri(image);
-    }
-
-    private byte[] downloadImage(String url) {
-        try {
-            return URI.create(url).toURL().openStream().readAllBytes();
-        } catch (IOException e) {
-            throw new IllegalArgumentException("Failed to download image from URL: " + e.getMessage());
-        }
-    }
-
-    private byte[] decodeDataUri(String dataUri) {
-        String base64Data;
-        if (dataUri.startsWith("data:")) {
-            int commaIndex = dataUri.indexOf(',');
-            if (commaIndex == -1) {
-                throw new IllegalArgumentException("Invalid Data URI format. Expected: data:image/png;base64,<data>");
-            }
-            base64Data = dataUri.substring(commaIndex + 1);
-        } else {
-            base64Data = dataUri;
-        }
-        return Base64.getDecoder().decode(base64Data);
     }
 
     private Role[] parseRoles(Guild guild, String roles) {
