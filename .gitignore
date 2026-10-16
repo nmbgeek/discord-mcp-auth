@@ -48,3 +48,6 @@ AGENTS.md
 ai-docs/
 issues/
 wiki/
+
+# Persistent OAuth grants and refresh credentials
+/data/

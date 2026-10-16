@@ -242,13 +242,15 @@ Default MCP endpoint URL (HTTP profile): `http://localhost:8085/mcp`
 
 ## HTTP authentication and remote access
 
-HTTP mode requires `Authorization: Bearer <MCP_AUTH_TOKEN>` on every request.
+HTTP mode supports a shared bearer token and optional OAuth browser login. Both protect MCP
+requests with an `Authorization: Bearer ...` header. To use a shared token:
 Set `MCP_AUTH_TOKEN` to a separate random secret generated with `openssl rand -hex 32`.
 Save it in your server's environment or `.env` and in each agent's secret store.
 Do not give agents your Discord bot token.
 
-The server refuses to start in HTTP mode if the token is missing, shorter than 32 characters,
-or contains characters outside the bearer-token format. Missing or incorrect credentials receive
+With OAuth disabled, the server refuses to start in HTTP mode if the token is missing.
+Any configured shared token must be at least 32 characters and use the bearer-token format.
+Missing or incorrect credentials receive
 `401 Unauthorized` with a `WWW-Authenticate: Bearer` challenge. Tokens in URLs, cookies, or MCP
 session IDs do not authorize requests. GET and HEAD requests to `/actuator/health` remain public
 for Docker probes, with health details and components hidden.
@@ -259,7 +261,8 @@ endpoints. Keep `env`, `configprops`, and heap dumps disabled in deployed instan
 and configuration values are explicitly masked with `show-values=never`; overriding endpoint
 access and masking settings can expose runtime secrets to callers with access.
 
-Authentication applies to all HTTP routes, including a custom MCP endpoint path. Local stdio
+Authentication protects HTTP routes, including a custom MCP endpoint path. OAuth mode also
+exposes its discovery, registration, token, and browser login endpoints. Local stdio
 connections need no bearer token. For trusted local development only, you can explicitly set
 `MCP_AUTH_ENABLED=false`; the server logs a warning when this is disabled.
 
@@ -278,10 +281,9 @@ For a proxy in another container, connect both services to a shared Docker netwo
 set `MCP_BIND_ADDRESS` in Compose and restrict access to that port. Use HTTPS for public access;
 the application's port serves plain HTTP.
 
-This is shared-secret authentication, with access to all tools and Discord permissions granted
-to the bot. It does not provide OAuth login, per-agent scopes, or individual token revocation.
-Clients must support a custom bearer token or Authorization header. OAuth-only connector UIs
-need an OAuth gateway and cannot connect directly with this token.
+A shared token grants access to all tools and Discord permissions granted to the bot. Clients
+using this mode must support a custom bearer token or Authorization header. For browser login
+in OAuth clients, enable the optional OAuth mode below.
 
 To rotate the secret, replace `MCP_AUTH_TOKEN` on the server, recreate the container with
 `docker compose up -d --force-recreate`, and update the agent secrets. Restarting closes existing
@@ -306,6 +308,95 @@ curl -i https://discord-mcp.example.com/mcp \
 A successful initialization returns `200` and server capabilities. The tests run this handshake,
 list tools, and call a harmless test tool through the real HTTP transport without a Discord connection.
 Run them with `mvn test`.
+
+## OAuth browser login and persistent authorization
+
+OAuth is optional and runs inside the Java server. It uses Spring Security for browser login,
+consent, authorization codes, PKCE, token exchange and revocation. No separate identity provider
+or Node.js service is required. The login is a single owner account for your instance, separate
+from your Discord account.
+
+Add these values to the server's `.env` file:
+
+```dotenv
+MCP_AUTH_ENABLED=true
+MCP_OAUTH_ENABLED=true
+MCP_OAUTH_ISSUER=https://discord-mcp.example.com
+MCP_OAUTH_USERNAME=your-login-name
+MCP_OAUTH_PASSWORD='your-long-plaintext-password'
+MCP_OAUTH_ACCESS_TOKEN_SECONDS=900
+MCP_OAUTH_REFRESH_TOKEN_DAYS=90
+```
+
+Use your real public HTTPS origin, with no trailing slash or path. Choose a password of 16 to
+256 characters. The password is plain text in the environment; you do not need to generate a
+password hash. The server derives a password verifier internally. Single-quote values in a
+Compose `.env` file to preserve literal `$` and `#` characters, and protect the file with
+`chmod 600 .env`. Public signup and password reset endpoints are not provided.
+
+Keep `MCP_AUTH_TOKEN` configured if unattended agents also use a static token. It can be empty
+when OAuth is enabled. OAuth cannot be combined with `MCP_AUTH_ENABLED=false`.
+
+Run `docker compose up -d --build` after configuring the values. Compose mounts the `oauth-data`
+named volume at `/app/data/oauth`. For `docker run`, also use
+`--env-file .env -v discord-mcp-oauth:/app/data/oauth -e MCP_OAUTH_DATA_DIR=/app/data/oauth`.
+For a manual Java deployment, point `MCP_OAUTH_DATA_DIR` at a persistent directory.
+
+The reverse proxy must forward the **entire origin**, including `/login`, `/oauth2/*` and
+`/.well-known/*`, as well as `/mcp`. Preserve the public `Host` header, keep HTTPS on the public
+side, and disable response buffering for MCP. This mode requires the application at the origin
+root, without a servlet context path. A custom MCP endpoint path is supported.
+
+For an OAuth client, configure the server URL as `https://discord-mcp.example.com/mcp` and choose
+OAuth authentication. The server advertises dynamic client registration, so compatible clients
+can obtain their own client ID automatically. Register with `token_endpoint_auth_method=none`
+for a public client or `client_secret_basic` for a confidential client. Registration always
+requires PKCE and user consent. HTTPS callbacks and HTTP loopback callbacks are supported;
+client metadata URLs are not fetched. Choose dynamic registration in clients that offer both
+that and Client ID Metadata Documents. CIMD is not implemented.
+
+In Codex, add the URL without static credentials and then log in:
+
+```bash
+codex mcp add discord_mcp --url https://discord-mcp.example.com/mcp
+codex mcp login discord_mcp
+```
+
+Remove an existing `http_headers.Authorization` or `bearer_token_env_var` setting for that client
+before switching it to OAuth. In ChatGPT's custom MCP connection setup, use the same server URL
+and OAuth with dynamic registration. The browser opens this instance's login page, where you
+enter `MCP_OAUTH_USERNAME` and `MCP_OAUTH_PASSWORD`, then approve the client's access.
+
+Request `mcp offline_access` scopes. `mcp` authorizes every tool the Discord bot can perform;
+there are no per-tool permission tiers. `offline_access` allows refresh tokens. A login cookie
+alone cannot call MCP, and OAuth access tokens do not authorize Actuator diagnostics.
+
+Access tokens expire after 15 minutes by default. Refresh tokens expire after 90 days without
+successful renewal. Each refresh returns a new refresh token with a new 90-day lifetime, so an
+active client can remain connected long term. The client must save the replacement token and
+serialize refresh requests. Reusing an old refresh token revokes that authorization grant,
+including its current access and refresh tokens. There is no retry grace period. A lost token
+response or duplicate refresh therefore requires a new login.
+
+Client registrations, grants and refresh-token replay history survive container restarts and
+image upgrades when the data volume is retained. Browser sessions and MCP transport sessions
+are recreated after a restart; clients can use their stored refresh token to reconnect. This
+embedded database supports one server process, not multiple replicas. OAuth storage uses POSIX
+file permissions and requires Linux or macOS, including the provided Linux container. Treat its directory and
+backups as secrets because they contain bearer credentials. The directory is owner-only and
+excluded from Git and Docker build context. Do not use `docker compose down -v` unless you intend
+to erase authorization state and require clients to register and log in again.
+
+Changing the owner username, password or public resource URL revokes all OAuth grants on the
+next startup. Clients can revoke a token at the advertised `/oauth2/revoke` endpoint. A shared
+`MCP_AUTH_TOKEN` remains valid until you rotate that value separately.
+
+Login attempts are limited to 10 per minute per direct peer, registration to 20, and token or
+revocation requests to 120. Global limits also apply. Behind a reverse proxy, callers may share
+that peer limit. Registration bodies are limited to 8 KiB, with at most five redirect URIs and
+1,000 stored clients. Abandoned registrations with no consent or grant expire after 24 hours;
+expired token history is cleaned up during operation. Apply additional request limits at your
+public proxy if needed.
 
 ## 🔗 Connections
 
@@ -488,12 +579,12 @@ STDIO local config (Default, legacy):
 ```
 
 Remote MCP Connector:
-Use a connector that supports custom Authorization headers, or place an OAuth gateway in front
-of the service if the connector requires OAuth. This server does not implement OAuth discovery or login.
+For a connector that requires OAuth, enable [OAuth browser login](#oauth-browser-login-and-persistent-authorization)
+and expose the server through your public HTTPS origin.
 
 1. Open Claude Desktop and go to `Settings` -> `Connectors`.
 2. Add a custom connector and set MCP URL to your server endpoint (for example `https://<PUBLIC_HOST>/mcp`).
-3. Configure the bearer token if supported, or the gateway's OAuth credentials, then reconnect.
+3. Choose OAuth and complete the instance's browser login and consent flow, or configure a bearer token if supported.
 
 > Claude Desktop remote connectors are managed via Connectors UI (not `claude_desktop_config.json`).
 > `http://localhost:8085/mcp` is reachable only from your machine. For Claude Desktop remote connectors, expose the endpoint with public HTTPS (for example tunnel/reverse proxy).

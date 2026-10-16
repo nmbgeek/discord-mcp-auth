@@ -1,6 +1,10 @@
 package dev.saseq.configs;
 
 import dev.saseq.security.BearerTokenFilter;
+import dev.saseq.security.oauth.OAuthAccess;
+import dev.saseq.security.oauth.OAuthConfig;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.context.annotation.Import;
 import jakarta.servlet.DispatcherType;
 import jakarta.servlet.Filter;
 import org.slf4j.Logger;
@@ -13,6 +17,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.core.Ordered;
 
 @Configuration(proxyBeanMethods = false)
+@Import(OAuthConfig.class)
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
 public class McpHttpAuthConfig {
 
@@ -21,7 +26,7 @@ public class McpHttpAuthConfig {
     @Bean
     public FilterRegistrationBean<Filter> mcpBearerTokenFilter(
             @Value("${mcp.auth.enabled:true}") boolean enabled,
-            @Value("${mcp.auth.token:}") String token) {
+            @Value("${mcp.auth.token:}") String token, ObjectProvider<OAuthAccess> oauth) {
         var registration = new FilterRegistrationBean<Filter>();
         registration.setEnabled(enabled);
         if (!enabled) {
@@ -32,7 +37,7 @@ public class McpHttpAuthConfig {
         }
 
         // Constructing the filter validates the secret before the HTTP server starts.
-        registration.setFilter(new BearerTokenFilter(token));
+        registration.setFilter(new BearerTokenFilter(token, oauth.getIfAvailable()));
         registration.setOrder(Ordered.HIGHEST_PRECEDENCE);
         registration.addUrlPatterns("/*");
         registration.setAsyncSupported(true);

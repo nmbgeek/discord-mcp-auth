@@ -1,5 +1,6 @@
 package dev.saseq.security;
 
+import dev.saseq.security.oauth.OAuthAccess;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -17,8 +18,18 @@ public final class BearerTokenFilter extends OncePerRequestFilter {
 
     private static final Pattern TOKEN = Pattern.compile("[A-Za-z0-9._~+/-]+=*");
     private final byte[] expectedDigest;
+    private final OAuthAccess oauth;
 
     public BearerTokenFilter(String token) {
+        this(token, null);
+    }
+
+    public BearerTokenFilter(String token, OAuthAccess oauth) {
+        this.oauth = oauth;
+        if (oauth != null && (token == null || token.isEmpty())) {
+            expectedDigest = null;
+            return;
+        }
         if (token == null || token.length() < 32 || !TOKEN.matcher(token).matches()) {
             throw new IllegalArgumentException(
                     "MCP_AUTH_TOKEN must contain at least 32 bearer-token characters. "
@@ -31,7 +42,7 @@ public final class BearerTokenFilter extends OncePerRequestFilter {
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
         // Keep Docker probes working without exposing health components or other routes.
-        return ("GET".equals(request.getMethod()) || "HEAD".equals(request.getMethod()))
+        return (oauth != null && oauth.isPublic(request)) || ("GET".equals(request.getMethod()) || "HEAD".equals(request.getMethod()))
                 && (request.getContextPath() + "/actuator/health").equals(request.getRequestURI());
     }
 
@@ -40,19 +51,19 @@ public final class BearerTokenFilter extends OncePerRequestFilter {
                                   FilterChain filterChain) throws ServletException, IOException {
         var headers = request.getHeaders("Authorization");
         String authorization = headers.hasMoreElements() ? headers.nextElement() : null;
-        if (!headers.hasMoreElements() && isAuthorized(authorization)) {
+        if (!headers.hasMoreElements() && isAuthorized(authorization, request)) {
             filterChain.doFilter(request, response);
             return;
         }
 
         response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-        response.setHeader("WWW-Authenticate", "Bearer realm=\"discord-mcp\"");
+        response.setHeader("WWW-Authenticate", oauth == null ? "Bearer realm=\"discord-mcp\"" : oauth.challenge());
         response.setHeader("Cache-Control", "no-store");
         response.setContentType("application/json");
         response.getWriter().write("{\"error\":\"unauthorized\"}");
     }
 
-    private boolean isAuthorized(String authorization) {
+    private boolean isAuthorized(String authorization, HttpServletRequest request) {
         if (authorization == null || !authorization.regionMatches(true, 0, "Bearer ", 0, 7)) {
             return false;
         }
@@ -61,7 +72,8 @@ public final class BearerTokenFilter extends OncePerRequestFilter {
         while (start < authorization.length() && authorization.charAt(start) == ' ') start++;
         String token = authorization.substring(start);
         return TOKEN.matcher(token).matches()
-                && MessageDigest.isEqual(expectedDigest, digest(token));
+                && ((expectedDigest != null && MessageDigest.isEqual(expectedDigest, digest(token)))
+                    || (oauth != null && oauth.accepts(token, request)));
     }
 
     private static byte[] digest(String token) {
