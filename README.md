@@ -34,6 +34,7 @@ Discord by managing channels, sending messages, and retrieving server informatio
 export DISCORD_TOKEN="YOUR_DISCORD_BOT_TOKEN"
 export DISCORD_GUILD_ID="OPTIONAL_DEFAULT_SERVER_ID"
 export SPRING_PROFILES_ACTIVE=http
+export MCP_AUTH_TOKEN="$(openssl rand -hex 32)"
 ```
 
 > [!IMPORTANT]
@@ -45,15 +46,19 @@ export SPRING_PROFILES_ACTIVE=http
 > When provided, it sets a default Discord server ID so any tool that accepts a `guildId` parameter can omit it.
 
 #### 2) Run the Docker container
+Build this checkout to include bearer authentication. The upstream published image may not include these changes.
+
 ```bash
+docker build -t discord-mcp:local .
 docker run -d -i \
   --name discord-mcp \
   --restart unless-stopped \
-  -p 8085:8085 \
+  -p 127.0.0.1:8085:8085 \
   -e SPRING_PROFILES_ACTIVE \
+  -e MCP_AUTH_TOKEN \
   -e DISCORD_TOKEN \
   -e DISCORD_GUILD_ID \
-  saseq/discord-mcp:latest
+  discord-mcp:local
 ```
 
 Default MCP endpoint URL (HTTP profile): `http://localhost:8085/mcp`
@@ -77,9 +82,11 @@ cd discord-mcp
 ```bash
 cat > .env <<EOF
 SPRING_PROFILES_ACTIVE=http
+MCP_AUTH_TOKEN=$(openssl rand -hex 32)
 DISCORD_TOKEN=<YOUR_DISCORD_BOT_TOKEN>
 DISCORD_GUILD_ID=<OPTIONAL_DEFAULT_SERVER_ID>
 EOF
+chmod 600 .env
 ```
 
 #### 4) Start one shared MCP server container
@@ -129,6 +136,7 @@ Run the JAR as a long-running server:
 DISCORD_TOKEN=<YOUR_DISCORD_BOT_TOKEN> \
 DISCORD_GUILD_ID=<OPTIONAL_DEFAULT_SERVER_ID> \
 SPRING_PROFILES_ACTIVE=http \
+MCP_AUTH_TOKEN="$MCP_AUTH_TOKEN" \
 java -jar /absolute/path/to/discord-mcp-1.0.0.jar
 ```
 
@@ -138,7 +146,71 @@ Default MCP endpoint URL (HTTP profile): `http://localhost:8085/mcp`
 
 </details>
 
+## HTTP authentication and remote access
+
+HTTP mode requires `Authorization: Bearer <MCP_AUTH_TOKEN>` on every request.
+Set `MCP_AUTH_TOKEN` to a separate random secret generated with `openssl rand -hex 32`.
+Save it in your server's environment or `.env` and in each agent's secret store.
+Do not give agents your Discord bot token.
+
+The server refuses to start in HTTP mode if the token is missing, shorter than 32 characters,
+or contains characters outside the bearer-token format. Missing or incorrect credentials receive
+`401 Unauthorized` with a `WWW-Authenticate: Bearer` challenge. Tokens in URLs, cookies, or MCP
+session IDs do not authorize requests. GET and HEAD requests to `/actuator/health` remain public
+for Docker probes, with health details and components hidden by the HTTP profile.
+
+Authentication applies to all HTTP routes, including a custom MCP endpoint path. Local stdio
+connections need no bearer token. For trusted local development only, you can explicitly set
+`MCP_AUTH_ENABLED=false`; the server logs a warning when this is disabled.
+
+For cloud agents:
+
+1. Run the server with the `http` profile and `MCP_AUTH_TOKEN` set.
+2. Put an HTTPS reverse proxy or tunnel in front of port 8085. Forward the `Authorization`
+   header and support streaming responses without buffering. The public URL should look like
+   `https://discord-mcp.example.com/mcp`.
+3. Configure the agent to send the bearer header on every request, including session requests.
+   Use the same secret stored on the server.
+
+Docker publishes port 8085 on `127.0.0.1` by default so a proxy on the host can reach it.
+For a proxy in another container, connect both services to a shared Docker network and use
+`http://discord-mcp:8085` as the upstream. If you need a different published interface,
+set `MCP_BIND_ADDRESS` in Compose and restrict access to that port. Use HTTPS for public access;
+the application's port serves plain HTTP.
+
+This is shared-secret authentication, with access to all tools and Discord permissions granted
+to the bot. It does not provide OAuth login, per-agent scopes, or individual token revocation.
+Clients must support a custom bearer token or Authorization header. OAuth-only connector UIs
+need an OAuth gateway and cannot connect directly with this token.
+
+To rotate the secret, replace `MCP_AUTH_TOKEN` on the server, recreate the container with
+`docker compose up -d --force-recreate`, and update the agent secrets. Restarting closes existing
+sessions, so clients must reconnect. Keep the token out of source control and request logs.
+
+Verify that unauthenticated requests return `401`:
+
+```bash
+curl -i https://discord-mcp.example.com/mcp
+```
+
+Then test an authenticated MCP initialization with the token loaded into your shell environment:
+
+```bash
+curl -i https://discord-mcp.example.com/mcp \
+  -H "Authorization: Bearer $MCP_AUTH_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"auth-check","version":"1.0"}}}'
+```
+
+A successful initialization returns `200` and server capabilities. The tests run this handshake,
+list tools, and call a harmless test tool through the real HTTP transport without a Discord connection.
+Run them with `mvn test`.
+
 ## 🔗 Connections
+
+Use your public HTTPS URL for remote agents. The HTTP examples below require the server's bearer
+token. Header configuration varies by client; store the token in the client's secret store where supported.
 
 ### ► 🗞️ Default config.json Connection
 
@@ -147,7 +219,10 @@ Recommended (HTTP singleton mode):
 {
   "mcpServers": {
     "discord-mcp": {
-      "url": "http://localhost:8085/mcp"
+      "url": "http://localhost:8085/mcp",
+      "headers": {
+        "Authorization": "Bearer <YOUR_MCP_AUTH_TOKEN>"
+      }
     }
   }
 }
@@ -181,7 +256,8 @@ Legacy mode (stdio, starts a new process/container per client session):
 
 Recommended (HTTP singleton mode):
 ```bash
-claude mcp add discord-mcp --transport http http://localhost:8085/mcp
+claude mcp add discord-mcp --transport http http://localhost:8085/mcp \
+  --header "Authorization: Bearer $MCP_AUTH_TOKEN"
 ```
 
 Legacy mode (stdio, starts a new process/container per client session):
@@ -197,9 +273,13 @@ claude mcp add discord-mcp -- docker run --rm -i -e DISCORD_TOKEN=<YOUR_DISCORD_
     </summary>
 
 ```bash
-codex mcp add discord-mcp --url http://localhost:8085/mcp
+codex mcp add discord-mcp --url https://discord-mcp.example.com/mcp \
+  --bearer-token-env-var MCP_AUTH_TOKEN
 codex mcp list
 ```
+
+Set `MCP_AUTH_TOKEN` in the environment that launches Codex. Codex reads the secret from that
+variable instead of storing the token directly in its MCP configuration.
 
 </details>
 
@@ -207,6 +287,10 @@ codex mcp list
     <summary style="font-size: 1.35em; font-weight: bold;">
         🦞 OpenClaw Connection
     </summary>
+
+These examples configure the URL and transport. Also configure OpenClaw to send
+`Authorization: Bearer <YOUR_MCP_AUTH_TOKEN>` using the header or secret settings supported by
+your installed version. A URL-only configuration receives `401` when authentication is enabled.
 
 Run this command:
 ```bash
@@ -244,7 +328,10 @@ Pasting the following configuration into your Cursor `~/.cursor/mcp.json` file i
 {
   "mcpServers": {
     "discord-mcp": {
-      "url": "http://localhost:8085/mcp"
+      "url": "http://localhost:8085/mcp",
+      "headers": {
+        "Authorization": "Bearer <YOUR_MCP_AUTH_TOKEN>"
+      }
     }
   }
 }
@@ -261,8 +348,9 @@ Pasting the following configuration into your Cursor `~/.cursor/mcp.json` file i
 1. Open n8n and add an **MCP Client** node.
 2. Choose **HTTP** or **Streamable HTTP** transport (depending on your n8n version/node options).
 3. Set the server URL to: `http://localhost:8085/mcp`
-4. Save the node and test the connection.
-5. After connecting, you can use the available Discord tools exposed by `discord-mcp` inside your workflow.
+4. Configure Header Auth with `Authorization` set to `Bearer <YOUR_MCP_AUTH_TOKEN>`.
+5. Save the node and test the connection.
+6. After connecting, you can use the available Discord tools exposed by `discord-mcp` inside your workflow.
 
 #### Notes
 - If n8n is running in Docker, `localhost` may point to the n8n container itself, not your host machine.
@@ -300,9 +388,12 @@ STDIO local config (Default, legacy):
 ```
 
 Remote MCP Connector:
+Use a connector that supports custom Authorization headers, or place an OAuth gateway in front
+of the service if the connector requires OAuth. This server does not implement OAuth discovery or login.
+
 1. Open Claude Desktop and go to `Settings` -> `Connectors`.
 2. Add a custom connector and set MCP URL to your server endpoint (for example `https://<PUBLIC_HOST>/mcp`).
-3. Save and reconnect.
+3. Configure the bearer token if supported, or the gateway's OAuth credentials, then reconnect.
 
 > Claude Desktop remote connectors are managed via Connectors UI (not `claude_desktop_config.json`).
 > `http://localhost:8085/mcp` is reachable only from your machine. For Claude Desktop remote connectors, expose the endpoint with public HTTPS (for example tunnel/reverse proxy).
