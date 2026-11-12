@@ -2,8 +2,6 @@ package dev.saseq.services;
 
 import net.dv8tion.jda.api.EmbedBuilder;
 import net.dv8tion.jda.api.JDA;
-import net.dv8tion.jda.api.entities.Guild;
-import net.dv8tion.jda.api.entities.Member;
 import net.dv8tion.jda.api.entities.Message;
 import net.dv8tion.jda.api.entities.User;
 import net.dv8tion.jda.api.entities.channel.concrete.TextChannel;
@@ -36,17 +34,13 @@ class MessageHistoryTest {
                 .setThumbnail("https://example.com/icon.png")
                 .build()));
 
-        JDA jda = mock(JDA.class);
+        JDA jda = mock(JDA.class, RETURNS_DEEP_STUBS);
         TextChannel channel = mock(TextChannel.class, RETURNS_DEEP_STUBS);
         when(jda.getTextChannelById("123")).thenReturn(channel);
         when(channel.getHistory().retrievePast(1).complete()).thenReturn(List.of(message));
 
-        Guild guild = mock(Guild.class, RETURNS_DEEP_STUBS);
-        Member member = mock(Member.class);
         User user = mock(User.class, RETURNS_DEEP_STUBS);
-        when(jda.getGuilds()).thenReturn(List.of(guild));
-        when(guild.retrieveMemberById("456").complete()).thenReturn(member);
-        when(member.getUser()).thenReturn(user);
+        when(jda.retrieveUserById("456").complete()).thenReturn(user);
         PrivateChannel privateChannel = mock(PrivateChannel.class, RETURNS_DEEP_STUBS);
         when(user.openPrivateChannel().complete()).thenReturn(privateChannel);
         when(privateChannel.getHistory().retrievePast(1).complete())
@@ -74,7 +68,7 @@ class MessageHistoryTest {
         when(message.getAttachments()).thenReturn(List.of(attachment));
 
         assertThat(MessageFormatter.formatMessages(List.of(message))).containsExactly(
-                "- (ID: 123456) **[Demo bot]** `2026-10-16T04:43Z`: ```Normal message```"
+                "- (ID: 123456) **[Demo bot]** (Author ID: 456) `2026-10-16T04:43Z`: ```Normal message```"
                         + "\n  Attachments:\n    - (Attachment ID: 789) `report.txt` (100 B, text/plain)"
                         + " URL: https://example.com/report.txt");
     }
@@ -99,6 +93,7 @@ class MessageHistoryTest {
         Message message = mock(Message.class, RETURNS_DEEP_STUBS);
         when(message.getId()).thenReturn("123456");
         when(message.getAuthor().getName()).thenReturn("Demo bot");
+        when(message.getAuthor().getId()).thenReturn("456");
         when(message.getTimeCreated()).thenReturn(OffsetDateTime.parse("2026-10-16T04:43:00Z"));
         when(message.getContentDisplay()).thenReturn(content);
         when(message.getEmbeds()).thenReturn(List.of());

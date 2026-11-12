@@ -2,6 +2,8 @@ package dev.saseq.services;
 
 import net.dv8tion.jda.api.entities.Message;
 import net.dv8tion.jda.api.entities.MessageEmbed;
+import net.dv8tion.jda.api.entities.MessageReference;
+import net.dv8tion.jda.api.entities.MessageType;
 
 import java.util.List;
 
@@ -12,10 +14,12 @@ final class MessageFormatter {
 
     static List<String> formatMessages(List<Message> messages) {
         return messages.stream().map(message -> {
+            String repliedToId = getRepliedToMessageId(message);
+            String replyInfo = repliedToId != null ? " [Reply to: " + repliedToId + "]" : "";
             StringBuilder output = new StringBuilder(String.format(
-                    "- (ID: %s) **[%s]** `%s`: ```%s```",
-                    message.getId(), message.getAuthor().getName(),
-                    message.getTimeCreated(), message.getContentDisplay()));
+                    "- (ID: %s) **[%s]** (Author ID: %s) `%s`%s: ```%s```",
+                    message.getId(), message.getAuthor().getName(), message.getAuthor().getId(),
+                    message.getTimeCreated(), replyInfo, message.getContentDisplay()));
 
             if (!message.getAttachments().isEmpty()) {
                 output.append("\n  Attachments:");
@@ -33,6 +37,13 @@ final class MessageFormatter {
             }
             return output.toString();
         }).toList();
+    }
+
+    /** Excludes forwards, thread starters and crossposts that also carry references. */
+    static String getRepliedToMessageId(Message message) {
+        MessageReference reference = message.getMessageReference();
+        return message.getType() == MessageType.INLINE_REPLY && reference != null
+                ? reference.getMessageId() : null;
     }
 
     static String formatAttachmentSummary(Message.Attachment attachment) {

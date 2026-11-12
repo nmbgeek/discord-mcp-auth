@@ -184,6 +184,19 @@ chmod 600 .env
 ```
 
 #### 4) Start one shared MCP server container
+
+The image runs as UID/GID `10001:10001`. New OAuth volumes are writable automatically.
+When upgrading an existing installation whose OAuth volume was created by the root-running
+image, back up the volume, then update its ownership before starting the new image:
+
+```bash
+docker compose stop discord-mcp-auth
+docker compose build discord-mcp-auth
+docker compose run --rm --no-deps --user 0 --entrypoint chown discord-mcp-auth -R 10001:10001 /app/data/oauth
+```
+
+Bind-mounted OAuth directories and log directories must also be writable by UID `10001`.
+
 ```bash
 docker compose up -d --build
 ```
@@ -599,18 +612,23 @@ and expose the server through your public HTTPS origin.
 
 #### User Management
 - [`get_user_id_by_name`](): Get a Discord user's ID by username in a guild for ping usage `<@id>`
+- [`get_member_by_id`](): Get a Discord guild member by stable user ID, including username, global name, nickname, effective name, bot flag, join time, and roles
+- [`search_members`](): Search Discord guild members by ID, username, global name, nickname, or effective name and return identity candidates with stable user IDs
 - [`send_private_message`](): Send a private message to a specific user
 - [`edit_private_message`](): Edit a private message from a specific user
 - [`delete_private_message`](): Delete a private message from a specific user
-- [`read_private_messages`](): Read private message history from a specific user (includes attachment metadata and embed JSON, supports `count` 1-100 and optional cursor: `before` or `after` or `around`)
+- [`read_private_messages`](): Read private message history from a specific user (includes author IDs, reply markers, attachment metadata and embed JSON, supports `count` 1-100 and optional cursor: `before` or `after` or `around`)
 
 #### Message Management
 - [`send_message`](): Send a message to a specific channel
 - [`edit_message`](): Edit a message from a specific channel
 - [`delete_message`](): Delete a message from a specific channel
-- [`read_messages`](): Read message history from a specific channel (includes attachment metadata and embed JSON, supports `count` 1-100 and optional cursor: `before` or `after` or `around`)
+- [`read_messages`](): Read message history from a specific channel (includes author IDs, reply markers, attachment metadata and embed JSON, supports `count` 1-100 and optional cursor: `before` or `after` or `around`)
+- [`search_messages`](): Search the most recent messages of a channel or thread for text (case-insensitive scan of up to 1000 messages, newest first)
 - [`add_reaction`](): Add a reaction (emoji) to a specific message
 - [`remove_reaction`](): Remove a specified reaction (emoji) from a message
+- [`get_message`](): Get a single message by ID in the same format as `read_messages`; replies include the message they reply to
+- [`get_message_replies`](): Find replies to a message by scanning the messages posted after it (up to 1000)
 
 #### Channel Management
 - [`create_text_channel`](): Create a new text channel
@@ -677,6 +695,11 @@ and expose the server through your public HTTPS origin.
 - [`list_invites`](): List all active invites on the server with their statistics
 - [`delete_invite`](): Delete (revoke) an invite so the link stops working
 - [`get_invite_details`](): Get details about a specific invite (works for any public invite)
+
+#### Thread Management
+- [`list_active_threads`](): List all active threads in the server
+- [`list_threads`](): List the threads of one channel (text, news, forum or media), including recent archived public threads; a returned thread ID works as `channelId` in the message tools (archived threads become usable there only after `list_threads` has been called on their parent channel)
+- [`get_thread_info`](): Get detailed information about a thread (parent channel, owner, archived/locked state, message and member counts; archived threads need `list_threads` on the parent channel first)
 
 #### Forum Management
 - [`create_forum_channel`](): Create a new forum channel

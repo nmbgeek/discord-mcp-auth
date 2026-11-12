@@ -2,6 +2,7 @@ package dev.saseq.services;
 
 import net.dv8tion.jda.api.JDA;
 import net.dv8tion.jda.api.entities.Message;
+import net.dv8tion.jda.api.entities.MessageHistory;
 import net.dv8tion.jda.api.entities.channel.concrete.NewsChannel;
 import net.dv8tion.jda.api.entities.channel.concrete.TextChannel;
 import net.dv8tion.jda.api.entities.channel.concrete.ThreadChannel;
@@ -12,7 +13,10 @@ import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 
 @Service
 public class MessageService {
@@ -129,7 +133,7 @@ public class MessageService {
         if (messageById == null) {
             throw new IllegalArgumentException("Message not found by messageId");
         }
-        messageById.delete().queue();
+        messageById.delete().complete();
         return "Message deleted successfully";
     }
 
@@ -143,7 +147,7 @@ public class MessageService {
      * @param around    Optional message ID to fetch messages around this message.
      * @return A formatted string containing the retrieved messages.
      */
-    @Tool(name = "read_messages", description = "Read message history from a specific channel, including attachments and embeds, optionally paginated with before/after/around")
+    @Tool(name = "read_messages", description = "Read message history from a specific channel, optionally paginated with before/after/around")
     public String readMessages(@ToolParam(description = "Discord channel ID") String channelId,
                                @ToolParam(description = "Number of messages to retrieve (1-100)", required = false) String count,
                                @ToolParam(description = "Message ID to fetch messages before this message", required = false) String before,
@@ -169,8 +173,8 @@ public class MessageService {
         } else {
             messages = channel.getHistory().retrievePast(limit).complete();
         }
-        List<String> formattedMessages = MessageFormatter.formatMessages(messages);
-        return "**Retrieved " + messages.size() + " messages:** \n" + String.join("\n", formattedMessages);
+        List<String> formatedMessages = MessageFormatter.formatMessages(messages);
+        return "**Retrieved " + messages.size() + " messages:** \n" + String.join("\n", formatedMessages);
     }
 
     private int parseMessageLimit(String count) {
@@ -215,6 +219,86 @@ public class MessageService {
     }
 
     /**
+     * Searches the most recent messages of a channel or thread for a piece of text.
+     * Discord offers no bot-accessible per-channel search, so this scans the history newest to oldest,
+     * 100 messages per request, up to {@code maxMessages}.
+     *
+     * @param channelId   The ID of the channel or thread to search in.
+     * @param searchText  The text to search for (case-insensitive, matched against the displayed message content).
+     * @param maxMessages Optional maximum number of recent messages to scan (1-1000, default 500).
+     * @return A formatted string with the matching messages and how many messages were scanned.
+     */
+    @Tool(name = "search_messages", description = "Search the most recent messages of a channel or thread for text (case-insensitive). Scans up to maxMessages messages from newest to oldest (default 500, max 1000); it is not a server-side search")
+    public String searchMessages(@ToolParam(description = "Discord channel or thread ID") String channelId,
+                                 @ToolParam(description = "Text to search for (case-insensitive)") String searchText,
+                                 @ToolParam(description = "Maximum number of recent messages to scan (1-1000, default 500)", required = false) String maxMessages) {
+        if (channelId == null || channelId.isEmpty()) {
+            throw new IllegalArgumentException("channelId cannot be null");
+        }
+        if (searchText == null || searchText.isBlank()) {
+            throw new IllegalArgumentException("searchText cannot be null");
+        }
+        int maxToScan = parseScanLimit(maxMessages);
+
+        MessageChannel channel = getMessageChannelById(channelId);
+        if (channel == null) {
+            throw new IllegalArgumentException("Channel not found by channelId");
+        }
+
+        String needle = searchText.toLowerCase(Locale.ROOT);
+        MessageHistory history = channel.getHistory();
+        List<Message> matches = new ArrayList<>();
+        int scanned = 0;
+        boolean reachedStart = false;
+        while (scanned < maxToScan) {
+            // Each retrievePast call continues from the oldest message retrieved so far.
+            List<Message> batch = history.retrievePast(Math.min(100, maxToScan - scanned)).complete();
+            if (batch.isEmpty()) {
+                reachedStart = true;
+                break;
+            }
+            for (Message m : batch) {
+                if (m.getContentDisplay().toLowerCase(Locale.ROOT).contains(needle)) {
+                    matches.add(m);
+                }
+            }
+            scanned += batch.size();
+        }
+        // The limit was hit exactly: probe one more message to tell whether anything older exists.
+        if (!reachedStart) {
+            reachedStart = history.retrievePast(1).complete().isEmpty();
+        }
+
+        String coverage = reachedStart
+                ? "the whole history was scanned"
+                : "older messages were not scanned";
+        if (matches.isEmpty()) {
+            return String.format("No messages found containing \"%s\" (scanned %d messages, %s).",
+                    searchText, scanned, coverage);
+        }
+        return String.format("**Found %d messages containing \"%s\" (scanned %d messages, %s):**\n%s",
+                matches.size(), searchText, scanned, coverage, String.join("\n", MessageFormatter.formatMessages(matches)));
+    }
+
+    private int parseScanLimit(String maxMessages) {
+        if (maxMessages == null || maxMessages.isBlank()) {
+            return 500;
+        }
+
+        int limit;
+        try {
+            limit = Integer.parseInt(maxMessages.trim());
+        } catch (NumberFormatException ex) {
+            throw new IllegalArgumentException("maxMessages must be an integer between 1 and 1000");
+        }
+
+        if (limit < 1 || limit > 1000) {
+            throw new IllegalArgumentException("maxMessages must be between 1 and 1000");
+        }
+        return limit;
+    }
+
+    /**
      * Adds a reaction (emoji) to a specific message in a Discord channel.
      *
      * @param channelId The ID of the channel containing the message.
@@ -244,7 +328,7 @@ public class MessageService {
         if (message == null) {
             throw new IllegalArgumentException("Message not found by messageId");
         }
-        message.addReaction(Emoji.fromUnicode(emoji)).queue();
+        message.addReaction(Emoji.fromUnicode(emoji)).complete();
         return "Added reaction successfully. Message link: " + message.getJumpUrl();
     }
 
@@ -278,7 +362,7 @@ public class MessageService {
         if (message == null) {
             throw new IllegalArgumentException("Message not found by messageId");
         }
-        message.removeReaction(Emoji.fromUnicode(emoji)).queue();
+        message.removeReaction(Emoji.fromUnicode(emoji)).complete();
         return "Removed reaction successfully. Message link: " + message.getJumpUrl();
     }
 
@@ -340,6 +424,116 @@ public class MessageService {
                 MessageFormatter.formatAttachmentSummary(attachment),
                 attachment.getProxyUrl()
         );
+    }
+
+    /**
+     * Retrieves a single message by ID, in the same format as {@code read_messages}.
+     * If the message is a reply, the message it replies to is included as well.
+     *
+     * @param channelId The ID of the channel or thread containing the message.
+     * @param messageId The ID of the message to retrieve.
+     * @return A formatted string with the message, its jump URL and, for replies, the replied-to message.
+     */
+    @Tool(name = "get_message", description = "Get a single message by ID, in the same format as read_messages. If the message is a reply, the message it replies to is included")
+    public String getMessage(@ToolParam(description = "Discord channel or thread ID") String channelId,
+                             @ToolParam(description = "Discord message ID") String messageId) {
+        if (channelId == null || channelId.isEmpty()) {
+            throw new IllegalArgumentException("channelId cannot be null");
+        }
+        if (messageId == null || messageId.isEmpty()) {
+            throw new IllegalArgumentException("messageId cannot be null");
+        }
+
+        MessageChannel channel = getMessageChannelById(channelId);
+        if (channel == null) {
+            throw new IllegalArgumentException("Channel not found by channelId");
+        }
+        Message message = channel.retrieveMessageById(messageId).complete();
+        if (message == null) {
+            throw new IllegalArgumentException("Message not found by messageId");
+        }
+
+        StringBuilder sb = new StringBuilder(MessageFormatter.formatMessages(List.of(message)).get(0));
+        sb.append("\n  Jump URL: ").append(message.getJumpUrl());
+
+        String repliedToId = MessageFormatter.getRepliedToMessageId(message);
+        if (repliedToId != null) {
+            Message referenced = message.getReferencedMessage();
+            if (referenced != null) {
+                sb.append("\n  Replying to: ").append(MessageFormatter.formatMessages(List.of(referenced)).get(0));
+            } else {
+                sb.append("\n  Replying to message ").append(repliedToId)
+                        .append(" (not available, it may have been deleted)");
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Finds the replies to a message. Discord has no "list replies" endpoint, so this scans the messages
+     * posted after the target message (oldest first, 100 per request) and keeps those that reply to it.
+     *
+     * @param channelId   The ID of the channel or thread containing the message.
+     * @param messageId   The ID of the message to find replies for.
+     * @param maxMessages Optional maximum number of messages after the target to scan (1-1000, default 500).
+     * @return A formatted string with the replies in chronological order and how far the scan went.
+     */
+    @Tool(name = "get_message_replies", description = "Find replies to a message by scanning the messages posted after it (up to maxMessages, default 500, max 1000). Discord has no replies lookup, so replies outside the scanned window are not found")
+    public String getMessageReplies(@ToolParam(description = "Discord channel or thread ID") String channelId,
+                                    @ToolParam(description = "ID of the message to find replies for") String messageId,
+                                    @ToolParam(description = "Maximum number of messages after the target to scan (1-1000, default 500)", required = false) String maxMessages) {
+        if (channelId == null || channelId.isEmpty()) {
+            throw new IllegalArgumentException("channelId cannot be null");
+        }
+        if (messageId == null || messageId.isEmpty()) {
+            throw new IllegalArgumentException("messageId cannot be null");
+        }
+        int maxToScan = parseScanLimit(maxMessages);
+
+        MessageChannel channel = getMessageChannelById(channelId);
+        if (channel == null) {
+            throw new IllegalArgumentException("Channel not found by channelId");
+        }
+        // Fails with a clear error if the message does not exist in this channel.
+        channel.retrieveMessageById(messageId).complete();
+
+        // A reply is always posted after the message it replies to, so walk forward from the target.
+        MessageHistory history = channel.getHistoryAfter(messageId, Math.min(100, maxToScan)).complete();
+        List<Message> batch = history.getRetrievedHistory();
+        List<Message> replies = new ArrayList<>();
+        int scanned = 0;
+        boolean reachedLatest = false;
+        while (true) {
+            if (batch.isEmpty()) {
+                reachedLatest = true;
+                break;
+            }
+            for (Message m : batch) {
+                if (messageId.equals(MessageFormatter.getRepliedToMessageId(m))) {
+                    replies.add(m);
+                }
+            }
+            scanned += batch.size();
+            if (scanned >= maxToScan) {
+                break;
+            }
+            batch = history.retrieveFuture(Math.min(100, maxToScan - scanned)).complete();
+        }
+        // The limit was hit exactly: probe one more message to tell whether anything newer exists.
+        if (!reachedLatest) {
+            reachedLatest = history.retrieveFuture(1).complete().isEmpty();
+        }
+        replies.sort(Comparator.comparingLong(Message::getIdLong));
+
+        String coverage = reachedLatest
+                ? "up to the latest message"
+                : "newer messages were not scanned";
+        if (replies.isEmpty()) {
+            return String.format("No replies to message %s found (scanned %d messages after it, %s).",
+                    messageId, scanned, coverage);
+        }
+        return String.format("**Found %d replies to message %s (scanned %d messages after it, %s):**\n%s",
+                replies.size(), messageId, scanned, coverage, String.join("\n", MessageFormatter.formatMessages(replies)));
     }
 
 }
