@@ -338,7 +338,7 @@ MCP_OAUTH_ISSUER=https://discord-mcp.example.com
 MCP_OAUTH_USERNAME=your-login-name
 MCP_OAUTH_PASSWORD='your-long-plaintext-password'
 MCP_OAUTH_ACCESS_TOKEN_SECONDS=900
-MCP_OAUTH_REFRESH_TOKEN_DAYS=90
+MCP_OAUTH_REFRESH_TOKEN_DAYS=365
 ```
 
 Use your real public HTTPS origin, with no trailing slash or path. Choose a password of 16 to
@@ -384,12 +384,23 @@ Request `mcp offline_access` scopes. `mcp` authorizes every tool the Discord bot
 there are no per-tool permission tiers. `offline_access` allows refresh tokens. A login cookie
 alone cannot call MCP, and OAuth access tokens do not authorize Actuator diagnostics.
 
-Access tokens expire after 15 minutes by default. Refresh tokens expire after 90 days without
-successful renewal. Each refresh returns a new refresh token with a new 90-day lifetime, so an
-active client can remain connected long term. The client must save the replacement token and
-serialize refresh requests. Reusing an old refresh token revokes that authorization grant,
-including its current access and refresh tokens. There is no retry grace period. A lost token
-response or duplicate refresh therefore requires a new login.
+Access tokens expire after 15 minutes by default; clients renew them automatically without
+another browser login. Refresh tokens expire after 365 days without successful renewal.
+Each refresh starts a new 365-day period, so an active client can remain authorized indefinitely.
+Existing deployments must set `MCP_OAUTH_REFRESH_TOKEN_DAYS=365` if their environment still
+explicitly sets `90`. Existing valid refresh tokens receive the new lifetime at their next renewal.
+
+Clients must save replacement refresh tokens. Identical bearer refresh retries within 60 seconds
+return the same access and refresh tokens, including after a server restart. Retrying does not
+extend that window or the tokens' expiry. This tolerates duplicate requests and lost responses.
+Retries must use the same client and scopes, and the replacement tokens must still be current
+and valid. Reusing a token outside the window revokes the grant and requires a new login.
+Revoked or expired authorizations cannot be restored by retrying. Clients should still serialize
+refreshes and avoid sharing token storage between independent agents.
+
+Refresh rejection codes and retry/replay events are logged without credentials or token values.
+If a client requests login after only a few days, check those events and whether it retained its
+latest refresh token; this is not the normal 365-day inactivity expiration.
 
 Client registrations, grants and refresh-token replay history survive container restarts and
 image upgrades when the data volume is retained. Browser sessions and MCP transport sessions

@@ -17,7 +17,7 @@ class OAuthSettingsTest {
         var settings = new OAuthSettings(valid());
         assertThat(settings.password).isEqualTo("plaintext-password-from-env");
         assertThat(settings.accessTtl.toMinutes()).isEqualTo(15);
-        assertThat(settings.refreshTtl.toDays()).isEqualTo(90);
+        assertThat(settings.refreshTtl.toDays()).isEqualTo(365);
     }
     @ParameterizedTest @ValueSource(strings = {"", "http://mcp.example.com", "https://mcp.example.com/", "https://mcp.example.com/path",
             "https://user:password@mcp.example.com", "https://mcp.example.com?query=1", "https://mcp.example.com#fragment"})

@@ -50,7 +50,7 @@ public final class OAuthSettings {
         directory = Path.of(env.getProperty("mcp.oauth.data-dir", "./data/oauth")).toAbsolutePath().normalize();
         if (directory.toString().contains(";")) throw new IllegalArgumentException("Invalid OAuth data directory");
         accessTtl = Duration.ofSeconds(env.getProperty("mcp.oauth.access-token-seconds", Long.class, 900L));
-        refreshTtl = Duration.ofDays(env.getProperty("mcp.oauth.refresh-token-days", Long.class, 90L));
+        refreshTtl = Duration.ofDays(env.getProperty("mcp.oauth.refresh-token-days", Long.class, 365L));
         if (accessTtl.getSeconds() < 30 || accessTtl.getSeconds() > 3600
                 || refreshTtl.toDays() < 1 || refreshTtl.toDays() > 365) {
             throw new IllegalArgumentException("OAuth access lifetime must be 30-3600 seconds and refresh lifetime 1-365 days");

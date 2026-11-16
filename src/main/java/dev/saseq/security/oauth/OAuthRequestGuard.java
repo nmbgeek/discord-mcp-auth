@@ -44,7 +44,7 @@ final class OAuthRequestGuard extends OncePerRequestFilter {
         boolean authorize = path.equals("/oauth2/authorize") && request.getParameter("response_type") != null;
         boolean token = path.equals("/oauth2/token");
         if (authorize || token) {
-            for (String name : new String[]{"resource", "client_id", "grant_type", "redirect_uri", "code", "code_verifier",
+            for (String name : new String[]{"resource", "client_id", "grant_type", "refresh_token", "redirect_uri", "code", "code_verifier",
                     "code_challenge", "code_challenge_method", "scope", "response_type", "state"}) {
                 String[] values = request.getParameterValues(name);
                 if (values != null && values.length != 1) { error(response, 400, "invalid_request"); return; }

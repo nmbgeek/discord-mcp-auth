@@ -8,7 +8,10 @@ import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.oauth2.core.OAuth2AccessToken;
 import org.springframework.security.oauth2.core.OAuth2AuthenticationException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.security.oauth2.server.authorization.*;
 import org.springframework.security.oauth2.server.authorization.client.JdbcRegisteredClientRepository;
 
@@ -18,9 +21,12 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.HexFormat;
+import java.util.Set;
 
 /** One embedded database per server instance. The directory must be on a persistent volume. */
 public final class OAuthStore implements OAuth2AuthorizationService, AutoCloseable {
+    private static final Logger log = LoggerFactory.getLogger(OAuthStore.class);
+    private static final long REFRESH_RETRY_SECONDS = 60;
     private final JdbcConnectionPool pool;
     public final JdbcTemplate jdbc;
     public final JdbcRegisteredClientRepository clients;
@@ -46,6 +52,9 @@ public final class OAuthStore implements OAuth2AuthorizationService, AutoCloseab
         }
         jdbc.execute("CREATE TABLE IF NOT EXISTS oauth_refresh_history (digest VARCHAR(64) PRIMARY KEY, "
                 + "authorization_id VARCHAR(100) NOT NULL, client_id VARCHAR(100) NOT NULL, expires_at BIGINT NOT NULL)");
+        // Legacy history has no retry allowance. Migration preserves all current grants.
+        jdbc.execute("ALTER TABLE oauth_refresh_history ADD COLUMN IF NOT EXISTS used_at BIGINT DEFAULT 0 NOT NULL");
+        jdbc.execute("ALTER TABLE oauth_refresh_history ADD COLUMN IF NOT EXISTS replacement_digest VARCHAR(64)");
         jdbc.execute("CREATE TABLE IF NOT EXISTS oauth_identity (id INT PRIMARY KEY, verifier VARCHAR(512) NOT NULL)");
         clients = new JdbcRegisteredClientRepository(jdbc);
         consents = new JdbcOAuth2AuthorizationConsentService(jdbc, clients);
@@ -72,24 +81,53 @@ public final class OAuthStore implements OAuth2AuthorizationService, AutoCloseab
             if (previous != null && previous.getRefreshToken() != null && authorization.getRefreshToken() != null) {
                 var old = previous.getRefreshToken().getToken();
                 if (!old.getTokenValue().equals(authorization.getRefreshToken().getToken().getTokenValue())) {
-                    jdbc.update("MERGE INTO oauth_refresh_history KEY(digest) VALUES (?, ?, ?, ?)",
+                    jdbc.update("MERGE INTO oauth_refresh_history "
+                                    + "(digest, authorization_id, client_id, expires_at, used_at, replacement_digest) "
+                                    + "KEY(digest) VALUES (?, ?, ?, ?, ?, ?)",
                             digest(old.getTokenValue()), previous.getId(), previous.getRegisteredClientId(),
-                            old.getExpiresAt().getEpochSecond());
+                            old.getExpiresAt().getEpochSecond(), Instant.now().getEpochSecond(),
+                            digest(authorization.getRefreshToken().getToken().getTokenValue()));
                 }
             }
             authorizations.save(authorization);
         });
     }
 
-    /** Called inside the same monitor as the complete refresh exchange to prevent double redemption. */
-    public synchronized void rejectReplay(String token, String registeredClientId) {
-        var ids = jdbc.queryForList("SELECT authorization_id FROM oauth_refresh_history WHERE digest=? AND client_id=?",
-                String.class, digest(token), registeredClientId);
-        if (!ids.isEmpty()) {
-            jdbc.update("DELETE FROM oauth2_authorization WHERE id=?", ids.get(0));
+    /** Return the already-issued pair for a brief retry; never rotate again or extend its expiry. */
+    public synchronized OAuth2Authorization retryRefresh(String token, String registeredClientId, Set<String> requestedScopes) {
+        var history = jdbc.query("SELECT authorization_id, expires_at, used_at, replacement_digest "
+                        + "FROM oauth_refresh_history WHERE digest=? AND client_id=?",
+                (rs, row) -> new UsedRefresh(rs.getString(1), rs.getLong(2), rs.getLong(3), rs.getString(4)),
+                digest(token), registeredClientId);
+        if (history.isEmpty()) return null;
+        var used = history.get(0);
+        long now = Instant.now().getEpochSecond();
+        if (now >= used.usedAt() + REFRESH_RETRY_SECONDS) {
+            jdbc.update("DELETE FROM oauth2_authorization WHERE id=?", used.authorizationId());
+            log.warn("OAuth refresh token reused outside the retry window; authorization revoked");
             throw new OAuth2AuthenticationException("invalid_grant");
         }
+        var authorization = authorizations.findById(used.authorizationId());
+        // A revoked, expired, or superseded result cannot be recovered. During the retry
+        // window reject it without deleting a newer grant another request has just renewed.
+        if (used.expiresAt() <= now || authorization == null
+                || authorization.getRefreshToken() == null || !authorization.getRefreshToken().isActive()
+                || authorization.getAccessToken() == null || !authorization.getAccessToken().isActive()
+                || !digest(authorization.getRefreshToken().getToken().getTokenValue()).equals(used.replacementDigest())) {
+            throw new OAuth2AuthenticationException("invalid_grant");
+        }
+        var access = authorization.getAccessToken().getToken();
+        // Proof-bound tokens must go through Spring's proof validation, never this bearer retry path.
+        if (!OAuth2AccessToken.TokenType.BEARER.equals(access.getTokenType())) {
+            throw new OAuth2AuthenticationException("invalid_grant");
+        }
+        var scopes = requestedScopes.isEmpty() ? authorization.getAuthorizedScopes() : requestedScopes;
+        if (!scopes.equals(access.getScopes())) throw new OAuth2AuthenticationException("invalid_scope");
+        log.info("Recovered OAuth refresh response within the retry window");
+        return authorization;
     }
+
+    private record UsedRefresh(String authorizationId, long expiresAt, long usedAt, String replacementDigest) {}
 
     public synchronized void cleanup() {
         long now = Instant.now().getEpochSecond();

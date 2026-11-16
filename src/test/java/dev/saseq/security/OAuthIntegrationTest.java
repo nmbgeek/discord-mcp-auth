@@ -106,7 +106,9 @@ class OAuthIntegrationTest {
         assertMcp(next.path("access_token").asString());
         var persisted = context.getBean(OAuthStore.class).findByToken(next.path("refresh_token").asString(),
                 org.springframework.security.oauth2.server.authorization.OAuth2TokenType.REFRESH_TOKEN);
-        assertThat(persisted.getRefreshToken().getToken().getExpiresAt()).isAfter(java.time.Instant.now().plus(Duration.ofDays(89)));
+        assertThat(persisted.getRefreshToken().getToken().getExpiresAt()).isAfter(java.time.Instant.now().plus(Duration.ofDays(364)));
+        // Reuse outside the retry window must still revoke the entire grant.
+        ageRefreshHistory();
         assertThat(refresh(client, tokens.path("refresh_token").asString(), null).statusCode()).isEqualTo(400);
         assertThat(refresh(client, next.path("refresh_token").asString(), null).statusCode()).isEqualTo(400);
         assertThat(send(API, "POST", "/mcp", "{}", next.path("access_token").asString()).statusCode()).isEqualTo(401);
@@ -119,6 +121,10 @@ class OAuthIntegrationTest {
         var refreshed = refresh(client, token.path("refresh_token").asString(), null);
         assertThat(refreshed.statusCode()).isEqualTo(200);
         assertMcp(JSON.readTree(refreshed.body()).path("access_token").asString());
+        var retry = refresh(client, token.path("refresh_token").asString(), null);
+        assertThat(retry.statusCode()).isEqualTo(200);
+        assertThat(JSON.readTree(retry.body()).path("refresh_token"))
+                .isEqualTo(JSON.readTree(refreshed.body()).path("refresh_token"));
     }
 
     @Test @Order(4) void rejectsRedirectPkceAndResourceAttacks() throws Exception {
@@ -147,10 +153,20 @@ class OAuthIntegrationTest {
         var nextResponse = refresh(client, refresh, "scope=mcp");
         assertThat(nextResponse.statusCode()).isEqualTo(200);
         var next = JSON.readTree(nextResponse.body());
+        // A retry must remain bound to the client, resource, and requested scopes.
+        assertThat(refresh(other, refresh, null).statusCode()).isEqualTo(400);
+        assertThat(refresh(client, refresh, "resource=" + enc("https://other.example/mcp")).statusCode()).isEqualTo(400);
+        assertThat(refresh(client, refresh, "scope=administrator").statusCode()).isEqualTo(400);
+        assertThat(refresh(client, refresh, null).statusCode()).isEqualTo(400);
+        var retried = refresh(client, refresh, "scope=mcp");
+        assertThat(retried.statusCode()).isEqualTo(200);
+        assertThat(JSON.readTree(retried.body()).path("refresh_token")).isEqualTo(next.path("refresh_token"));
+        assertMcp(next.path("access_token").asString());
         var revoked = send(API, "POST", "/oauth2/revoke", form("client_id", client.path("client_id").asString(),
                 "token", next.path("refresh_token").asString(), "token_type_hint", "refresh_token"), null);
         assertThat(revoked.statusCode()).isEqualTo(200);
         assertThat(refresh(client, next.path("refresh_token").asString(), null).statusCode()).isEqualTo(400);
+        assertThat(refresh(client, refresh, "scope=mcp").statusCode()).isEqualTo(400);
         assertThat(send(API, "POST", "/mcp", "{}", next.path("access_token").asString()).statusCode()).isEqualTo(401);
     }
 
@@ -178,7 +194,7 @@ class OAuthIntegrationTest {
         assertThat(jsonPost("/oauth2/register", " ".repeat(8193)).statusCode()).isEqualTo(413);
     }
 
-    @Test @Order(8) void concurrentRefreshHasOnlyOneWinnerAndDetectsReuse() throws Exception {
+    @Test @Order(8) void concurrentRefreshReturnsTheSameTokensWithoutRevokingTheGrant() throws Exception {
         var client = register("none");
         var tokens = exchange(client, authorize(client, VERIFIER), VERIFIER);
         String body = form("grant_type", "refresh_token", "client_id", client.path("client_id").asString(),
@@ -187,7 +203,14 @@ class OAuthIntegrationTest {
                 .header("Content-Type", "application/x-www-form-urlencoded").POST(HttpRequest.BodyPublishers.ofString(body)).build();
         var first = API.sendAsync(request, HttpResponse.BodyHandlers.ofString());
         var second = API.sendAsync(request, HttpResponse.BodyHandlers.ofString());
-        assertThat(List.of(first.get().statusCode(), second.get().statusCode())).containsExactlyInAnyOrder(200, 400);
+        var firstResponse = first.get();
+        var secondResponse = second.get();
+        assertThat(List.of(firstResponse.statusCode(), secondResponse.statusCode())).containsExactly(200, 200);
+        var firstTokens = JSON.readTree(firstResponse.body());
+        var secondTokens = JSON.readTree(secondResponse.body());
+        assertThat(firstTokens.path("refresh_token")).isEqualTo(secondTokens.path("refresh_token"));
+        assertThat(firstTokens.path("access_token")).isEqualTo(secondTokens.path("access_token"));
+        assertMcp(firstTokens.path("access_token").asString());
     }
 
     @Test @Order(9) void refreshAndReplayHistorySurviveRestartAndCredentialChangeRevokesTokens() throws Exception {
@@ -201,6 +224,7 @@ class OAuthIntegrationTest {
         assertThat(afterRestart.statusCode()).isEqualTo(200);
         var finalTokens = JSON.readTree(afterRestart.body());
         assertMcp(finalTokens.path("access_token").asString());
+        ageRefreshHistory();
         assertThat(refresh(client, initial.path("refresh_token").asString(), null).statusCode()).isEqualTo(400);
         assertThat(refresh(client, finalTokens.path("refresh_token").asString(), null).statusCode()).isEqualTo(400);
         // Re-starting with different owner credentials removes every stored grant.
@@ -239,6 +263,96 @@ class OAuthIntegrationTest {
         }
         assertThat(response.statusCode()).isEqualTo(429);
         assertThat(response.headers().firstValue("Retry-After")).contains("60");
+    }
+
+    static void ageRefreshHistory() {
+        context.getBean(OAuthStore.class).jdbc.update("UPDATE oauth_refresh_history SET used_at=?",
+                java.time.Instant.now().minusSeconds(61).getEpochSecond());
+    }
+
+    @Test @Order(8) void retriesDoNotExtendExpiryAndCannotRecoverSupersededTokens() throws Exception {
+        var client = register("none");
+        var initial = exchange(client, authorize(client, VERIFIER), VERIFIER);
+        var next = JSON.readTree(refresh(client, initial.path("refresh_token").asString(), null).body());
+        var store = context.getBean(OAuthStore.class);
+        var stored = store.findByToken(next.path("refresh_token").asString(),
+                org.springframework.security.oauth2.server.authorization.OAuth2TokenType.REFRESH_TOKEN);
+        var historyBefore = store.jdbc.queryForList("SELECT * FROM oauth_refresh_history WHERE authorization_id=?", stored.getId());
+        assertThat(refresh(client, initial.path("refresh_token").asString(), null).statusCode()).isEqualTo(200);
+        assertThat(store.jdbc.queryForList("SELECT * FROM oauth_refresh_history WHERE authorization_id=?", stored.getId()))
+                .isEqualTo(historyBefore);
+        assertThat(store.findById(stored.getId()).getRefreshToken().getToken().getExpiresAt())
+                .isEqualTo(stored.getRefreshToken().getToken().getExpiresAt());
+        var current = JSON.readTree(refresh(client, next.path("refresh_token").asString(), null).body());
+        assertThat(refresh(client, initial.path("refresh_token").asString(), null).statusCode()).isEqualTo(400);
+        assertMcp(current.path("access_token").asString());
+    }
+
+    @Test @Order(8) void existingNinetyDayRegistrationGetsYearLongRenewals() throws Exception {
+        var client = register("none");
+        var store = context.getBean(OAuthStore.class);
+        var registered = store.clients.findByClientId(client.path("client_id").asString());
+        store.clients.save(org.springframework.security.oauth2.server.authorization.client.RegisteredClient.from(registered)
+                .tokenSettings(org.springframework.security.oauth2.server.authorization.settings.TokenSettings
+                        .withSettings(registered.getTokenSettings().getSettings())
+                        .refreshTokenTimeToLive(Duration.ofDays(90)).build()).build());
+        var initial = exchange(client, authorize(client, VERIFIER), VERIFIER);
+        var next = JSON.readTree(refresh(client, initial.path("refresh_token").asString(), null).body());
+        var persisted = store.findByToken(next.path("refresh_token").asString(),
+                org.springframework.security.oauth2.server.authorization.OAuth2TokenType.REFRESH_TOKEN);
+        assertThat(persisted.getRefreshToken().getToken().getExpiresAt())
+                .isAfter(java.time.Instant.now().plus(Duration.ofDays(364)));
+    }
+
+    @Test @Order(8) void retryCannotRecoverExpiredTokensOrExtendItsDeadline() throws Exception {
+        var client = register("none");
+        var initial = exchange(client, authorize(client, VERIFIER), VERIFIER);
+        var next = JSON.readTree(refresh(client, initial.path("refresh_token").asString(), null).body());
+        var store = context.getBean(OAuthStore.class);
+        var stored = store.findByToken(next.path("refresh_token").asString(),
+                org.springframework.security.oauth2.server.authorization.OAuth2TokenType.REFRESH_TOKEN);
+        store.jdbc.update("UPDATE oauth_refresh_history SET expires_at=? WHERE authorization_id=?",
+                java.time.Instant.now().minusSeconds(1).getEpochSecond(), stored.getId());
+        assertThat(refresh(client, initial.path("refresh_token").asString(), null).statusCode()).isEqualTo(400);
+        assertMcp(next.path("access_token").asString());
+        store.jdbc.update("UPDATE oauth_refresh_history SET expires_at=? WHERE authorization_id=?",
+                java.time.Instant.now().plusSeconds(3600).getEpochSecond(), stored.getId());
+        store.jdbc.update("UPDATE oauth2_authorization SET access_token_issued_at=DATEADD('SECOND', -120, CURRENT_TIMESTAMP), "
+                + "access_token_expires_at=DATEADD('SECOND', -60, CURRENT_TIMESTAMP) WHERE id=?", stored.getId());
+        assertThat(refresh(client, initial.path("refresh_token").asString(), null).statusCode()).isEqualTo(400);
+        // An expired access token does not stop a normal renewal with the current refresh token.
+        assertThat(refresh(client, next.path("refresh_token").asString(), null).statusCode()).isEqualTo(200);
+    }
+
+    @Test @Order(8) void legacyReplaySchemaMigratesWithoutLosingCurrentGrants() throws Exception {
+        var client = register("none");
+        var initial = exchange(client, authorize(client, VERIFIER), VERIFIER);
+        var next = JSON.readTree(refresh(client, initial.path("refresh_token").asString(), null).body());
+        var store = context.getBean(OAuthStore.class);
+        store.jdbc.execute("ALTER TABLE oauth_refresh_history DROP COLUMN used_at");
+        store.jdbc.execute("ALTER TABLE oauth_refresh_history DROP COLUMN replacement_digest");
+        context.close();
+        start(PASSWORD);
+        assertMcp(next.path("access_token").asString());
+        assertThat(refresh(client, next.path("refresh_token").asString(), null).statusCode()).isEqualTo(200);
+        // A token used before migration has no retry allowance.
+        assertThat(refresh(client, initial.path("refresh_token").asString(), null).statusCode()).isEqualTo(400);
+        login(PASSWORD);
+    }
+
+    @Test @Order(8) void lostRefreshResponseCanBeRetriedAfterServerRestart() throws Exception {
+        var client = register("none");
+        var initial = exchange(client, authorize(client, VERIFIER), VERIFIER);
+        var next = JSON.readTree(refresh(client, initial.path("refresh_token").asString(), null).body());
+        context.close();
+        start(PASSWORD);
+        var retried = refresh(client, initial.path("refresh_token").asString(), null);
+        assertThat(retried.statusCode()).isEqualTo(200);
+        var recovered = JSON.readTree(retried.body());
+        assertThat(recovered.path("refresh_token")).isEqualTo(next.path("refresh_token"));
+        assertThat(recovered.path("access_token")).isEqualTo(next.path("access_token"));
+        assertMcp(recovered.path("access_token").asString());
+        login(PASSWORD);
     }
 
     static JsonNode register(String method) throws Exception {

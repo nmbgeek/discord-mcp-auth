@@ -23,6 +23,8 @@ import org.springframework.security.provisioning.InMemoryUserDetailsManager;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.LoginUrlAuthenticationEntryPoint;
 import org.springframework.security.web.context.SecurityContextHolderFilter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.security.SecureRandom;
 import java.time.Instant;
@@ -36,6 +38,7 @@ import java.util.Map;
 @EnableWebSecurity
 @ComponentScan(basePackageClasses = OAuthEndpoints.class)
 public class OAuthConfig {
+    private static final Logger log = LoggerFactory.getLogger(OAuthConfig.class);
     @Bean OAuthSettings oauthSettings(Environment env) { return new OAuthSettings(env); }
     @Bean PasswordEncoder oauthPasswordEncoder() {
         return new DelegatingPasswordEncoder("pbkdf2", Map.of("pbkdf2", Pbkdf2PasswordEncoder.defaultsForSpringSecurity_v5_8()));
@@ -58,7 +61,7 @@ public class OAuthConfig {
         access.setAccessTokenCustomizer(context -> context.getClaims()
                 .audience(new java.util.ArrayList<>(List.of(settings.resource))).claim("resource", settings.resource));
         // Spring's default generator intentionally omits public-client refresh tokens.
-        // Our clients use mandatory PKCE, single-use rotation and durable replay detection.
+        // Our clients use mandatory PKCE, rotation with bounded retries, and durable replay detection.
         SecureRandom random = new SecureRandom();
         OAuth2TokenGenerator<OAuth2RefreshToken> refresh = context -> {
             if (!OAuth2TokenType.REFRESH_TOKEN.equals(context.getTokenType())) return null;
@@ -129,13 +132,27 @@ public class OAuthConfig {
                 // H2 holds an exclusive process lock on the database; this monitor also
                 // serializes token exchanges inside that single process.
                 synchronized (store) {
-                    if (authentication instanceof OAuth2RefreshTokenAuthenticationToken refresh) {
-                        var client = (OAuth2ClientAuthenticationToken) refresh.getPrincipal();
-                        if (client.isAuthenticated() && client.getRegisteredClient() != null) {
-                            store.rejectReplay(refresh.getRefreshToken(), client.getRegisteredClient().getId());
+                    try {
+                        if (authentication instanceof OAuth2RefreshTokenAuthenticationToken refresh) {
+                            var client = (OAuth2ClientAuthenticationToken) refresh.getPrincipal();
+                            if (client.isAuthenticated() && client.getRegisteredClient() != null) {
+                                if (!client.getRegisteredClient().getAuthorizationGrantTypes().contains(AuthorizationGrantType.REFRESH_TOKEN)) {
+                                    throw new OAuth2AuthenticationException("unauthorized_client");
+                                }
+                                var previous = store.retryRefresh(refresh.getRefreshToken(), client.getRegisteredClient().getId(), refresh.getScopes());
+                                if (previous != null) {
+                                    return new OAuth2AccessTokenAuthenticationToken(client.getRegisteredClient(), client,
+                                            previous.getAccessToken().getToken(), previous.getRefreshToken().getToken());
+                                }
+                            }
                         }
+                        return delegate.authenticate(authentication);
+                    } catch (OAuth2AuthenticationException ex) {
+                        if (authentication instanceof OAuth2RefreshTokenAuthenticationToken) {
+                            log.warn("OAuth refresh rejected: {}", ex.getError().getErrorCode());
+                        }
+                        throw ex;
                     }
-                    return delegate.authenticate(authentication);
                 }
             }
             @Override public boolean supports(Class<?> type) { return delegate.supports(type); }
